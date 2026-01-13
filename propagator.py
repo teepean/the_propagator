@@ -46,7 +46,9 @@ class YDNAPropagator:
         """Ensure we don't exceed API rate limits."""
         elapsed = time.time() - self.last_request_time
         if elapsed < self.request_delay:
-            time.sleep(self.request_delay - elapsed)
+            wait = self.request_delay - elapsed
+            print(f"    [Rate limit: waiting {wait:.1f}s]", flush=True)
+            time.sleep(wait)
         self.last_request_time = time.time()
 
     def authenticate(self, auth_code: str = None) -> bool:
@@ -67,11 +69,14 @@ class YDNAPropagator:
         self._rate_limit()
 
         try:
+            print(f"    [Fetching profile: {profile_id}]", flush=True)
             profile_data = self.client.get_profile(profile_id)
             self.db.save_profile(profile_data)
+            name = get_name(profile_data)
+            print(f"    [Saved: {name}]", flush=True)
             return profile_data
         except Exception as e:
-            print(f"Error fetching profile {profile_id}: {e}")
+            print(f"    [Error fetching profile {profile_id}: {e}]")
             return None
 
     def fetch_immediate_family(self, profile_id: str) -> dict:
@@ -80,12 +85,13 @@ class YDNAPropagator:
 
         Returns dict with parsed family relationships.
         """
+        print(f"    [Fetching family: {profile_id}]", flush=True)
         self._rate_limit()
 
         try:
             family_data = self.client.get_immediate_family(profile_id)
         except Exception as e:
-            print(f"Error fetching family for {profile_id}: {e}")
+            print(f"    [Error fetching family for {profile_id}: {e}]")
             return {}
 
         nodes = family_data.get("nodes", {})
@@ -185,21 +191,23 @@ class YDNAPropagator:
         # Fetch from Geni
         family = self.fetch_immediate_family(profile_id)
         parents = family.get("parents", [])
+        focus = family.get("focus", {})
+
+        # Get the actual child ID from the focus (API normalizes IDs)
+        actual_child_id = focus.get("id") if focus else profile_id
+
+        # Ensure child profile is saved first
+        if focus:
+            self.db.save_profile(focus)
 
         # Find the male parent
         for parent in parents:
             if parent.get("gender") == "male":
                 parent_id = parent.get("id")
-                # Ensure both profiles are saved before creating link
+                # Save parent profile before creating link
                 self.db.save_profile(parent)
-                # Also ensure child profile exists
-                child_profile = self.db.get_profile(profile_id)
-                if not child_profile:
-                    focus = family.get("focus", {})
-                    if focus:
-                        self.db.save_profile(focus)
-                # Create paternal link
-                self.db.add_paternal_link(parent_id, profile_id)
+                # Create paternal link using actual IDs
+                self.db.add_paternal_link(parent_id, actual_child_id)
                 return parent
 
         return None
@@ -223,13 +231,14 @@ class YDNAPropagator:
         # Fetch from Geni
         family = self.fetch_immediate_family(profile_id)
         children = family.get("children", [])
+        focus = family.get("focus", {})
+
+        # Get actual parent ID from API response
+        actual_parent_id = focus.get("id") if focus else profile_id
 
         # Ensure parent profile exists in DB
-        parent_profile = self.db.get_profile(profile_id)
-        if not parent_profile:
-            focus = family.get("focus", {})
-            if focus:
-                self.db.save_profile(focus)
+        if focus:
+            self.db.save_profile(focus)
 
         # Find male children
         sons = []
@@ -238,8 +247,8 @@ class YDNAPropagator:
                 child_id = child.get("id")
                 # Ensure child profile is saved before creating link
                 self.db.save_profile(child)
-                # Create paternal link
-                self.db.add_paternal_link(profile_id, child_id)
+                # Create paternal link using actual IDs
+                self.db.add_paternal_link(actual_parent_id, child_id)
                 sons.append(child)
 
         return sons
@@ -508,7 +517,8 @@ class YDNAPropagator:
             root_id = root_profile.get("id") or root_profile.get("geni_id")
         else:
             root_profile = self.fetch_and_save_profile(start_profile_id)
-            root_id = start_profile_id
+            # Use actual ID from API, not the input ID
+            root_id = root_profile.get("id") if root_profile else start_profile_id
 
         stats["root_profile_id"] = root_id
         root_name = get_name(root_profile) if root_profile else "Unknown"
