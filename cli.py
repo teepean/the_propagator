@@ -536,7 +536,7 @@ def cmd_run_interactive(args):
 
     # Prompt for profile ID
     print("Enter the Geni profile ID of the person with known Y-DNA.")
-    print("(You can find this in the profile URL, e.g., profile-34684695479)")
+    print("(Copy the number from the profile URL, e.g., 6000000040364004409)")
     print()
     profile_id = input("Profile ID: ").strip()
 
@@ -545,9 +545,8 @@ def cmd_run_interactive(args):
         propagator.close()
         return 1
 
-    # Normalize profile ID
-    if not profile_id.startswith("profile-"):
-        profile_id = f"profile-{profile_id}"
+    # Normalize profile ID using client's method (handles GUIDs)
+    profile_id = propagator.client.normalize_profile_id(profile_id)
 
     # Fetch and display the profile
     print()
