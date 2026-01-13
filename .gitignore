@@ -2,6 +2,10 @@
 config.json
 geni_token.json
 
+# Large data files (download separately)
+ftdna_haplotree.json
+geni_dump_*.json
+
 # Database files
 *.db
 *.db.backup

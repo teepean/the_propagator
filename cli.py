@@ -15,6 +15,7 @@ from pathlib import Path
 
 from propagator import YDNAPropagator
 from database import Database
+from haplotree import Haplotree, print_comparison
 
 
 def generate_tree_filename(profile: dict, prefix: str = "tree") -> str:
@@ -380,6 +381,50 @@ def cmd_export(args):
     return 0
 
 
+def cmd_compare(args):
+    """Compare two haplogroups to find their relationship."""
+    tree = Haplotree(args.haplotree)
+    print_comparison(args.haplogroup1, args.haplogroup2, tree)
+    return 0
+
+
+def cmd_haplotree_info(args):
+    """Show information about a haplogroup from the FTDNA haplotree."""
+    tree = Haplotree(args.haplotree)
+
+    node = tree.find_by_name(args.haplogroup)
+    if not node:
+        print(f"Haplogroup {args.haplogroup} not found in FTDNA haplotree")
+        return 1
+
+    print(f"\n{'='*60}")
+    print(f"Haplogroup: {args.haplogroup}")
+    print(f"{'='*60}")
+
+    print(f"  Root: {node.get('root', 'Unknown')}")
+    print(f"  Sub-branches: {node.get('subBranches', 0)}")
+    print(f"  BigY count: {node.get('bigYCount', 0)}")
+
+    # Get ancestry path
+    path = tree.get_ancestry_path(args.haplogroup)
+    print(f"\nAncestry ({len(path)} levels):")
+    for i, (_, name) in enumerate(path[:20]):
+        print(f"  {i}: {name}")
+    if len(path) > 20:
+        print(f"  ... ({len(path) - 20} more)")
+
+    # Show defining SNPs
+    variants = node.get('variants', [])
+    if variants and args.snps:
+        print(f"\nDefining SNPs ({len(variants)}):")
+        for v in variants[:10]:
+            print(f"  {v.get('variant')}: pos {v.get('position')} ({v.get('ancestral')} -> {v.get('derived')})")
+        if len(variants) > 10:
+            print(f"  ... ({len(variants) - 10} more)")
+
+    return 0
+
+
 def export_profiles_csv(profiles: list, filename: str):
     """Export profiles to CSV file."""
     if not profiles:
@@ -496,6 +541,20 @@ def main():
     export_parser.add_argument("haplogroup", help="Haplogroup to export")
     export_parser.add_argument("output", help="Output CSV file")
     export_parser.set_defaults(func=cmd_export)
+
+    # Compare haplogroups command
+    compare_parser = subparsers.add_parser("compare", help="Compare two haplogroups to find their relationship")
+    compare_parser.add_argument("haplogroup1", help="First haplogroup (e.g., R-A11110)")
+    compare_parser.add_argument("haplogroup2", help="Second haplogroup (e.g., R-BY117398)")
+    compare_parser.add_argument("--haplotree", default="ftdna_haplotree.json", help="Path to FTDNA haplotree JSON")
+    compare_parser.set_defaults(func=cmd_compare)
+
+    # Haplotree info command
+    info_parser = subparsers.add_parser("info", help="Show information about a haplogroup")
+    info_parser.add_argument("haplogroup", help="Haplogroup name (e.g., R-M269)")
+    info_parser.add_argument("--snps", action="store_true", help="Show defining SNPs")
+    info_parser.add_argument("--haplotree", default="ftdna_haplotree.json", help="Path to FTDNA haplotree JSON")
+    info_parser.set_defaults(func=cmd_haplotree_info)
 
     # Run interactive command
     run_parser = subparsers.add_parser("run", help="Interactive mode - prompts for profile and haplogroup")
