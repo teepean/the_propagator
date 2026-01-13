@@ -480,7 +480,7 @@ class YDNAPropagator:
         }
 
     def propagate_full_tree(self, start_profile_id: str, haplogroup: str,
-                            source: str = "FTDNA") -> dict:
+                            source: str = "FTDNA", resume: bool = False) -> dict:
         """
         Propagate haplogroup from furthest ancestor to ALL male descendants.
 
@@ -492,6 +492,7 @@ class YDNAPropagator:
             start_profile_id: Any profile in the paternal line
             haplogroup: Y-DNA haplogroup to propagate
             source: Source of the haplogroup data
+            resume: If True, skip profiles already explored for this haplogroup
 
         Returns:
             Dict with propagation statistics
@@ -500,12 +501,19 @@ class YDNAPropagator:
             "haplogroup": haplogroup,
             "root_profile_id": None,
             "total_propagated": 0,
+            "skipped_explored": 0,
             "generations": 0,
-            "conflicts": []
+            "conflicts": [],
+            "resumed": resume
         }
 
         print(f"\n{'='*60}")
-        print(f"Full tree propagation of {haplogroup}")
+        if resume:
+            explored_count = self.db.get_explored_count(haplogroup)
+            print(f"RESUMING tree propagation of {haplogroup}")
+            print(f"Already explored: {explored_count} profiles")
+        else:
+            print(f"Full tree propagation of {haplogroup}")
         print(f"{'='*60}")
 
         # First, find the oldest ancestor
@@ -534,8 +542,27 @@ class YDNAPropagator:
             if generation > self.max_gen_down:
                 return
 
-            # Always fetch from Geni to discover ALL sons
+            # Check if already explored (for resume)
+            if resume and self.db.is_explored(profile_id, haplogroup):
+                # Still need to recurse through known sons from database
+                sons = self.db.get_sons(profile_id)
+                if sons:
+                    indent = "  " * generation
+                    print(f"{indent}[Skipping explored: {profile_id}, checking {len(sons)} known sons]", flush=True)
+                    stats["skipped_explored"] += 1
+                    for son in sons:
+                        son_id = son.get("geni_id") or son.get("id")
+                        # Ensure haplogroup is assigned
+                        self._assign_haplogroup(son_id, haplogroup, f"propagated_{source}", stats)
+                        # Recurse
+                        propagate_to_all_sons(son_id, generation + 1)
+                return
+
+            # Fetch from Geni to discover ALL sons
             sons = self.get_sons(profile_id, force_fetch=True)
+
+            # Mark this profile as explored
+            self.db.mark_explored(profile_id, haplogroup)
 
             for son in sons:
                 son_id = son.get("id") or son.get("geni_id")
@@ -559,6 +586,8 @@ class YDNAPropagator:
         print(f"Full tree propagation complete:")
         print(f"  Root ancestor: {root_name} ({root_id})")
         print(f"  Total profiles: {stats['total_propagated']}")
+        if resume:
+            print(f"  Skipped (already explored): {stats['skipped_explored']}")
         print(f"  Max generations: {stats['generations']}")
         print(f"  Conflicts: {len(stats['conflicts'])}")
         print(f"{'='*60}")

@@ -221,7 +221,8 @@ def cmd_full_tree(args):
     stats = propagator.propagate_full_tree(
         args.profile_id,
         args.haplogroup,
-        source=args.source
+        source=args.source,
+        resume=args.resume
     )
 
     # Always export - generate unique filename if not specified
@@ -511,6 +512,7 @@ def main():
     fulltree_parser.add_argument("profile_id", help="Any profile in the paternal line")
     fulltree_parser.add_argument("haplogroup", help="Y-DNA haplogroup (e.g., R-M269)")
     fulltree_parser.add_argument("--source", "-s", default="FTDNA", help="Source of haplogroup data")
+    fulltree_parser.add_argument("--resume", "-r", action="store_true", help="Resume interrupted propagation")
     fulltree_parser.add_argument("--export", "-e", help="Export results to CSV file")
     fulltree_parser.set_defaults(func=cmd_full_tree)
 
@@ -642,6 +644,16 @@ def cmd_run_interactive(args):
     print("Enter the source of the haplogroup data (default: FTDNA):")
     source = input("Source [FTDNA]: ").strip() or "FTDNA"
 
+    # Check if this haplogroup has previous progress
+    explored_count = propagator.db.get_explored_count(haplogroup)
+    resume = False
+
+    if explored_count > 0:
+        print()
+        print(f"Found {explored_count} previously explored profiles for {haplogroup}.")
+        print("Do you want to resume from where you left off? (y/n)")
+        resume = input().strip().lower() == 'y'
+
     # Confirm and run
     print()
     print("=" * 60)
@@ -649,11 +661,15 @@ def cmd_run_interactive(args):
     print(f"  Profile: {profile_name} ({profile_id})")
     print(f"  Haplogroup: {haplogroup}")
     print(f"  Source: {source}")
+    if resume:
+        print(f"  Mode: RESUME (skipping {explored_count} explored profiles)")
     print("=" * 60)
     print()
     print("This will:")
     print("  1. Find the oldest paternal ancestor")
     print("  2. Propagate the haplogroup to ALL male descendants")
+    if resume:
+        print("  3. Skip profiles already explored")
     print("  3. Save results to a CSV file")
     print()
     print("Continue? (y/n)")
@@ -665,7 +681,7 @@ def cmd_run_interactive(args):
 
     # Run full tree propagation
     print()
-    stats = propagator.propagate_full_tree(profile_id, haplogroup, source=source)
+    stats = propagator.propagate_full_tree(profile_id, haplogroup, source=source, resume=resume)
 
     # Export results
     profiles = propagator.db.get_profiles_by_haplogroup(haplogroup)

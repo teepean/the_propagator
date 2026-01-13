@@ -131,6 +131,16 @@ class Database:
             )
         """)
 
+        # Explored profiles table - tracks which profiles have had their families fetched
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS explored_profiles (
+                profile_id TEXT PRIMARY KEY,
+                haplogroup TEXT,
+                explored_at TEXT,
+                FOREIGN KEY (profile_id) REFERENCES profiles(geni_id)
+            )
+        """)
+
         # Create indexes for faster lookups
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_gender ON profiles(gender)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_last_name ON profiles(last_name)")
@@ -138,6 +148,7 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_paternal_child ON paternal_links(child_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_haplogroups_profile ON haplogroups(profile_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_haplogroups_haplogroup ON haplogroups(haplogroup)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_explored_haplogroup ON explored_profiles(haplogroup)")
 
         self.conn.commit()
 
@@ -407,6 +418,44 @@ class Database:
 
         self.conn.commit()
         return cursor.lastrowid
+
+    def mark_explored(self, profile_id: str, haplogroup: str):
+        """Mark a profile as explored (its family has been fetched)."""
+        cursor = self.conn.cursor()
+        now = datetime.utcnow().isoformat()
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO explored_profiles (profile_id, haplogroup, explored_at)
+            VALUES (?, ?, ?)
+        """, (profile_id, haplogroup, now))
+
+        self.conn.commit()
+
+    def is_explored(self, profile_id: str, haplogroup: str) -> bool:
+        """Check if a profile has been explored for a specific haplogroup propagation."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM explored_profiles
+            WHERE profile_id = ? AND haplogroup = ?
+        """, (profile_id, haplogroup))
+        return cursor.fetchone() is not None
+
+    def get_explored_count(self, haplogroup: str) -> int:
+        """Get count of explored profiles for a haplogroup."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM explored_profiles WHERE haplogroup = ?
+        """, (haplogroup,))
+        return cursor.fetchone()[0]
+
+    def clear_explored(self, haplogroup: str = None):
+        """Clear explored markers. If haplogroup specified, only clear for that haplogroup."""
+        cursor = self.conn.cursor()
+        if haplogroup:
+            cursor.execute("DELETE FROM explored_profiles WHERE haplogroup = ?", (haplogroup,))
+        else:
+            cursor.execute("DELETE FROM explored_profiles")
+        self.conn.commit()
 
     def get_statistics(self) -> dict:
         """Get database statistics."""
