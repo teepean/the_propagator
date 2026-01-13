@@ -1,0 +1,20 @@
+{
+    "geni": {
+        "base_url": "https://www.geni.com",
+        "app_id": "YOUR_APP_ID",
+        "client_id": "YOUR_CLIENT_ID",
+        "client_secret": "YOUR_CLIENT_SECRET",
+        "api_version": "1",
+        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob"
+    },
+    "database": {
+        "path": "ydna_propagator.db"
+    },
+    "propagation": {
+        "max_generations_up": 50,
+        "max_generations_down": 50
+    },
+    "rate_limit": {
+        "delay": 3.0
+    }
+}
