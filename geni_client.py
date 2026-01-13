@@ -168,19 +168,49 @@ class GeniClient:
 
         raise Exception(f"API request failed after {retries} retries: 429 - Rate limit exceeded")
 
+    def normalize_profile_id(self, profile_id: str) -> str:
+        """
+        Normalize profile ID to API format.
+
+        Accepts:
+            - profile-12345 (API ID)
+            - 12345 (numeric API ID)
+            - profile-g6000000040364004409 (GUID format)
+            - 6000000040364004409 (GUID from URL)
+
+        Returns:
+            Normalized profile ID for API calls
+        """
+        profile_id = profile_id.strip()
+
+        # Already in correct format
+        if profile_id.startswith("profile-g") or profile_id.startswith("profile-"):
+            return profile_id
+
+        # Check if it's a GUID (16+ digits) or regular ID
+        if profile_id.isdigit():
+            if len(profile_id) >= 16:
+                # GUID format - use profile-g prefix
+                return f"profile-g{profile_id}"
+            else:
+                # Regular API ID
+                return f"profile-{profile_id}"
+
+        # Default: treat as regular ID
+        return f"profile-{profile_id}"
+
     def get_profile(self, profile_id: str, fields: list = None) -> dict:
         """
         Get a profile by ID.
 
         Args:
-            profile_id: The Geni profile ID (e.g., "profile-12345" or just "12345")
+            profile_id: The Geni profile ID, GUID, or URL fragment
             fields: Optional list of fields to retrieve
 
         Returns:
             Profile data dictionary
         """
-        if not profile_id.startswith("profile-"):
-            profile_id = f"profile-{profile_id}"
+        profile_id = self.normalize_profile_id(profile_id)
 
         params = {}
         if fields:
@@ -194,9 +224,7 @@ class GeniClient:
 
         Returns dict with 'focus' (the profile) and 'nodes' (family members and unions)
         """
-        if not profile_id.startswith("profile-"):
-            profile_id = f"profile-{profile_id}"
-
+        profile_id = self.normalize_profile_id(profile_id)
         return self._make_request(f"{profile_id}/immediate-family")
 
     def get_ancestors(self, profile_id: str, generations: int = 5) -> dict:
@@ -204,15 +232,13 @@ class GeniClient:
         Get ancestors for a profile.
 
         Args:
-            profile_id: The Geni profile ID
+            profile_id: The Geni profile ID or GUID
             generations: Number of generations to retrieve (max 20)
 
         Returns:
             Dict with 'focus' and 'nodes' containing ancestor profiles/unions
         """
-        if not profile_id.startswith("profile-"):
-            profile_id = f"profile-{profile_id}"
-
+        profile_id = self.normalize_profile_id(profile_id)
         params = {"generations": min(generations, 20)}
         return self._make_request(f"{profile_id}/ancestors", params)
 
