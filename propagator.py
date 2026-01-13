@@ -190,6 +190,14 @@ class YDNAPropagator:
         for parent in parents:
             if parent.get("gender") == "male":
                 parent_id = parent.get("id")
+                # Ensure both profiles are saved before creating link
+                self.db.save_profile(parent)
+                # Also ensure child profile exists
+                child_profile = self.db.get_profile(profile_id)
+                if not child_profile:
+                    focus = family.get("focus", {})
+                    if focus:
+                        self.db.save_profile(focus)
                 # Create paternal link
                 self.db.add_paternal_link(parent_id, profile_id)
                 return parent
@@ -216,11 +224,20 @@ class YDNAPropagator:
         family = self.fetch_immediate_family(profile_id)
         children = family.get("children", [])
 
+        # Ensure parent profile exists in DB
+        parent_profile = self.db.get_profile(profile_id)
+        if not parent_profile:
+            focus = family.get("focus", {})
+            if focus:
+                self.db.save_profile(focus)
+
         # Find male children
         sons = []
         for child in children:
             if child.get("gender") == "male":
                 child_id = child.get("id")
+                # Ensure child profile is saved before creating link
+                self.db.save_profile(child)
                 # Create paternal link
                 self.db.add_paternal_link(profile_id, child_id)
                 sons.append(child)
