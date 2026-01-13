@@ -497,13 +497,138 @@ def main():
     export_parser.add_argument("output", help="Output CSV file")
     export_parser.set_defaults(func=cmd_export)
 
+    # Run interactive command
+    run_parser = subparsers.add_parser("run", help="Interactive mode - prompts for profile and haplogroup")
+    run_parser.set_defaults(func=cmd_run_interactive)
+
     args = parser.parse_args()
 
     if not args.command:
-        parser.print_help()
-        return 1
+        # Default to interactive mode
+        args.command = "run"
+        args.config = "config.json"
+        args.database = "ydna_propagator.db"
+        return cmd_run_interactive(args)
 
     return args.func(args)
+
+
+def cmd_run_interactive(args):
+    """Interactive mode - prompts for profile ID and haplogroup."""
+    print("=" * 60)
+    print("Y-DNA Propagator - Interactive Mode")
+    print("=" * 60)
+    print()
+
+    propagator = YDNAPropagator(args.config)
+
+    if not propagator.authenticate():
+        print("Authentication failed. Please check your credentials.")
+        return 1
+
+    # Get current user info
+    try:
+        user = propagator.client.get_user()
+        print(f"Authenticated as: {user.get('name', 'Unknown')}")
+        print()
+    except Exception:
+        pass
+
+    # Prompt for profile ID
+    print("Enter the Geni profile ID of the person with known Y-DNA.")
+    print("(You can find this in the profile URL, e.g., profile-34684695479)")
+    print()
+    profile_id = input("Profile ID: ").strip()
+
+    if not profile_id:
+        print("No profile ID provided. Exiting.")
+        propagator.close()
+        return 1
+
+    # Normalize profile ID
+    if not profile_id.startswith("profile-"):
+        profile_id = f"profile-{profile_id}"
+
+    # Fetch and display the profile
+    print()
+    print(f"Fetching profile {profile_id}...")
+    try:
+        profile = propagator.client.get_profile(profile_id)
+        profile_name = profile.get("display_name") or profile.get("name") or "Unknown"
+        gender = profile.get("gender", "unknown")
+        print(f"Found: {profile_name} ({gender})")
+
+        if gender != "male":
+            print("Warning: Y-DNA is only inherited through the male line.")
+            print("This profile is not male. Continue anyway? (y/n)")
+            if input().strip().lower() != 'y':
+                propagator.close()
+                return 1
+    except Exception as e:
+        print(f"Error fetching profile: {e}")
+        propagator.close()
+        return 1
+
+    # Prompt for haplogroup
+    print()
+    print("Enter the Y-DNA haplogroup (e.g., R-BY117398, I-M253, N-M231):")
+    haplogroup = input("Haplogroup: ").strip()
+
+    if not haplogroup:
+        print("No haplogroup provided. Exiting.")
+        propagator.close()
+        return 1
+
+    # Prompt for source
+    print()
+    print("Enter the source of the haplogroup data (default: FTDNA):")
+    source = input("Source [FTDNA]: ").strip() or "FTDNA"
+
+    # Confirm and run
+    print()
+    print("=" * 60)
+    print("Ready to propagate:")
+    print(f"  Profile: {profile_name} ({profile_id})")
+    print(f"  Haplogroup: {haplogroup}")
+    print(f"  Source: {source}")
+    print("=" * 60)
+    print()
+    print("This will:")
+    print("  1. Find the oldest paternal ancestor")
+    print("  2. Propagate the haplogroup to ALL male descendants")
+    print("  3. Save results to a CSV file")
+    print()
+    print("Continue? (y/n)")
+
+    if input().strip().lower() != 'y':
+        print("Cancelled.")
+        propagator.close()
+        return 0
+
+    # Run full tree propagation
+    print()
+    stats = propagator.propagate_full_tree(profile_id, haplogroup, source=source)
+
+    # Export results
+    profiles = propagator.db.get_profiles_by_haplogroup(haplogroup)
+    root_profile = propagator.db.get_profile(stats["root_profile_id"])
+
+    if root_profile:
+        export_file = generate_tree_filename(root_profile, prefix=f"tree_{haplogroup}")
+    else:
+        export_file = f"tree_{haplogroup}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    export_profiles_csv(profiles, export_file)
+
+    print()
+    print("=" * 60)
+    print("Complete!")
+    print(f"  Profiles with {haplogroup}: {len(profiles)}")
+    print(f"  Exported to: {export_file}")
+    print("=" * 60)
+
+    propagator.close()
+    return 0
 
 
 if __name__ == "__main__":
