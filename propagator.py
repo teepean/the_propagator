@@ -535,6 +535,9 @@ class YDNAPropagator:
         # Propagate to the root
         self._assign_haplogroup(root_id, haplogroup, source, stats)
 
+        # Always record tree membership (even if haplogroup was already assigned)
+        self.db.add_tree_membership(root_id, haplogroup, generation=0, root_profile_id=root_id)
+
         # Recursively propagate to ALL descendants
         print(f"\nPropagating to all male descendants...")
 
@@ -554,6 +557,8 @@ class YDNAPropagator:
                         son_id = son.get("geni_id") or son.get("id")
                         # Ensure haplogroup is assigned
                         self._assign_haplogroup(son_id, haplogroup, f"propagated_{source}", stats)
+                        # Always record tree membership
+                        self.db.add_tree_membership(son_id, haplogroup, generation=generation, root_profile_id=root_id)
                         # Recurse
                         propagate_to_all_sons(son_id, generation + 1)
                 return
@@ -573,6 +578,9 @@ class YDNAPropagator:
                 assigned = self._assign_haplogroup(son_id, haplogroup, f"propagated_{source}", stats)
                 status = "+" if assigned else "="
                 print(f"{indent}{status} Gen {generation}: {son_name} ({son_id})")
+
+                # Always record tree membership (tracks which profiles are in this tree)
+                self.db.add_tree_membership(son_id, haplogroup, generation=generation, root_profile_id=root_id)
 
                 # Recurse to this son's sons
                 propagate_to_all_sons(son_id, generation + 1)
@@ -597,17 +605,15 @@ class YDNAPropagator:
     def _assign_haplogroup(self, profile_id: str, haplogroup: str,
                            source: str, stats: dict) -> bool:
         """Helper to assign haplogroup and track statistics."""
-        existing = self.db.get_haplogroup(profile_id)
+        # Check if this SPECIFIC haplogroup is already assigned to this profile
+        existing = self.db.get_profile_haplogroups(profile_id)
 
-        if existing:
-            if existing["haplogroup"] != haplogroup:
-                stats["conflicts"].append({
-                    "profile_id": profile_id,
-                    "existing": existing["haplogroup"],
-                    "new": haplogroup
-                })
-            return False
+        for hg in existing:
+            if hg["haplogroup"] == haplogroup:
+                # Already has this exact haplogroup
+                return False
 
+        # Add the haplogroup (allows multiple haplogroups per profile)
         self.db.add_haplogroup(
             profile_id,
             haplogroup,

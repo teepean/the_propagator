@@ -426,6 +426,264 @@ def cmd_haplotree_info(args):
     return 0
 
 
+def cmd_tree_overlaps(args):
+    """Show overlapping profiles between haplogroup trees."""
+    db = Database(args.database)
+
+    if args.haplogroup1 and args.haplogroup2:
+        # Compare two specific trees
+        overlaps = db.get_tree_overlaps(args.haplogroup1, args.haplogroup2)
+
+        print(f"\n{'='*60}")
+        print(f"Tree overlap: {args.haplogroup1} vs {args.haplogroup2}")
+        print(f"{'='*60}")
+        print(f"Overlapping profiles: {len(overlaps)}")
+
+        if overlaps:
+            print(f"\n{'Profile ID':<30} {'Name':<30} {'Gen1':<6} {'Gen2':<6}")
+            print("-" * 72)
+            for p in overlaps[:50]:
+                name = p.get('display_name') or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip() or "Unknown"
+                print(f"{p['profile_id']:<30} {name[:29]:<30} {p['gen_in_tree1'] or '?':<6} {p['gen_in_tree2'] or '?':<6}")
+            if len(overlaps) > 50:
+                print(f"... and {len(overlaps) - 50} more")
+
+        if args.export and overlaps:
+            with open(args.export, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=['profile_id', 'display_name', 'first_name', 'last_name', 'birth_place', 'gen_in_tree1', 'gen_in_tree2'])
+                writer.writeheader()
+                writer.writerows(overlaps)
+            print(f"\nExported to {args.export}")
+    else:
+        # Show all overlaps
+        overlaps = db.get_all_tree_overlaps()
+        tree_stats = db.get_tree_statistics()
+
+        print(f"\n{'='*60}")
+        print("Tree Membership Statistics")
+        print(f"{'='*60}")
+
+        print("\nTrees:")
+        for t in tree_stats.get('trees', []):
+            print(f"  {t['haplogroup']}: {t['count']} profiles, max gen {t['max_gen']}")
+
+        print(f"\nProfiles in multiple trees: {tree_stats.get('profiles_in_multiple_trees', 0)}")
+
+        if overlaps:
+            print(f"\nOverlaps between trees:")
+            for pair, count in sorted(overlaps.items(), key=lambda x: -x[1]):
+                print(f"  {pair}: {count} profiles")
+        else:
+            print("\nNo overlaps found between trees.")
+
+    db.close()
+    return 0
+
+
+def cmd_import_project(args):
+    """Import profiles from a Geni haplogroup project."""
+    import requests
+    import time
+
+    propagator = YDNAPropagator(args.config)
+
+    if not propagator.authenticate():
+        print("Authentication failed.")
+        return 1
+
+    # Get project profiles
+    project_id = args.project_id
+    haplogroup = args.haplogroup
+
+    print(f"\n{'='*60}")
+    print(f"Importing from Geni project: {project_id}")
+    print(f"Haplogroup: {haplogroup}")
+    print(f"{'='*60}\n")
+
+    # Fetch project info first
+    token = propagator.client.access_token
+
+    try:
+        response = requests.get(
+            f'https://www.geni.com/api/project-{project_id}',
+            params={'access_token': token}
+        )
+        if response.status_code == 200:
+            project_info = response.json()
+            print(f"Project: {project_info.get('name', 'Unknown')}")
+        else:
+            print(f"Warning: Could not fetch project info (status {response.status_code})")
+    except Exception as e:
+        print(f"Warning: Could not fetch project info: {e}")
+
+    # Fetch all project profiles using next_page URL
+    all_profiles = []
+    next_url = f'https://www.geni.com/api/project-{project_id}/profiles'
+    page = 0
+
+    while next_url:
+        try:
+            time.sleep(3)  # Rate limiting
+
+            # Use next_url directly if it contains access_token, otherwise add it
+            if 'access_token=' in next_url:
+                response = requests.get(next_url)
+            else:
+                response = requests.get(next_url, params={'access_token': token})
+
+            if response.status_code == 429:
+                print("  Rate limited, waiting 15s...")
+                time.sleep(15)
+                continue
+
+            if response.status_code != 200:
+                print(f"Error fetching profiles: {response.status_code}")
+                break
+
+            data = response.json()
+            profiles = data.get('results', [])
+
+            if not profiles:
+                break
+
+            all_profiles.extend(profiles)
+            page = data.get('page', page + 1)
+            print(f"  Fetched page {page}: {len(profiles)} profiles (total: {len(all_profiles)})")
+
+            # Get next page URL from response
+            next_url = data.get('next_page')
+
+        except Exception as e:
+            print(f"Error: {e}")
+            break
+
+    print(f"\nFound {len(all_profiles)} profiles in project")
+
+    # Check which profiles we already have
+    existing_count = 0
+    new_profiles = []
+
+    for p in all_profiles:
+        profile_id = p.get('id')
+        if profile_id:
+            existing = propagator.db.get_haplogroup(profile_id)
+            if existing and any(h.get('haplogroup') == haplogroup for h in [existing] if isinstance(existing, dict)):
+                existing_count += 1
+            else:
+                new_profiles.append(p)
+
+    print(f"Already in database with {haplogroup}: {existing_count}")
+    print(f"New profiles to process: {len(new_profiles)}")
+
+    if not new_profiles:
+        print("\nNo new profiles to import.")
+        propagator.close()
+        return 0
+
+    # Import new profiles
+    imported = 0
+    propagate_sources = []
+
+    for p in new_profiles:
+        profile_id = p.get('id')
+        name = p.get('name', 'Unknown')
+        is_public = p.get('public', False)
+
+        if not profile_id:
+            continue
+
+        # Save profile to database
+        try:
+            # Fetch full profile data if public
+            if is_public:
+                time.sleep(2)
+                full_profile = propagator.fetch_and_save_profile(profile_id)
+                if full_profile:
+                    propagator.db.add_haplogroup(
+                        profile_id,
+                        haplogroup,
+                        "project_import",
+                        is_tested=True,
+                        confidence="confirmed"
+                    )
+                    imported += 1
+                    propagate_sources.append(profile_id)
+                    print(f"  Imported: {name} ({profile_id})")
+            else:
+                # For private profiles, just add haplogroup without full data
+                propagator.db.add_haplogroup(
+                    profile_id,
+                    haplogroup,
+                    "project_import",
+                    is_tested=True,
+                    confidence="confirmed"
+                )
+                imported += 1
+                print(f"  Added (private): {name} ({profile_id})")
+
+        except Exception as e:
+            print(f"  Error importing {profile_id}: {e}")
+
+    print(f"\nImported {imported} profiles")
+
+    # Optionally propagate from new profiles
+    if args.propagate and propagate_sources:
+        print(f"\n{'='*60}")
+        print(f"Propagating from {len(propagate_sources)} new profiles...")
+        print(f"{'='*60}\n")
+
+        for profile_id in propagate_sources[:args.max_propagate]:
+            print(f"\nPropagating from {profile_id}...")
+            try:
+                stats = propagator.propagate_full_tree(
+                    profile_id,
+                    haplogroup,
+                    source="propagated_project"
+                )
+                print(f"  Added {stats.get('total_propagated', 0)} profiles")
+            except Exception as e:
+                print(f"  Error: {e}")
+
+    # Export results
+    profiles = propagator.db.get_profiles_by_haplogroup(haplogroup)
+    print(f"\nTotal profiles with {haplogroup}: {len(profiles)}")
+
+    propagator.close()
+    return 0
+
+
+def cmd_tree_members(args):
+    """List members of a haplogroup tree."""
+    db = Database(args.database)
+
+    members = db.get_tree_members(args.haplogroup)
+
+    print(f"\n{'='*60}")
+    print(f"Tree members: {args.haplogroup}")
+    print(f"{'='*60}")
+    print(f"Total: {len(members)}")
+
+    if members:
+        print(f"\n{'Gen':<5} {'Profile ID':<30} {'Name':<35}")
+        print("-" * 70)
+        for m in members[:100]:
+            name = m.get('display_name') or f"{m.get('first_name', '')} {m.get('last_name', '')}".strip() or "Unknown"
+            gen = m.get('generation', '?')
+            print(f"{gen:<5} {m['profile_id']:<30} {name[:34]:<35}")
+        if len(members) > 100:
+            print(f"... and {len(members) - 100} more")
+
+    if args.export:
+        with open(args.export, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['profile_id', 'haplogroup', 'generation', 'display_name', 'first_name', 'last_name', 'birth_place'])
+            writer.writeheader()
+            writer.writerows(members)
+        print(f"\nExported to {args.export}")
+
+    db.close()
+    return 0
+
+
 def export_profiles_csv(profiles: list, filename: str):
     """Export profiles to CSV file."""
     if not profiles:
@@ -557,6 +815,27 @@ def main():
     info_parser.add_argument("--snps", action="store_true", help="Show defining SNPs")
     info_parser.add_argument("--haplotree", default="ftdna_haplotree.json", help="Path to FTDNA haplotree JSON")
     info_parser.set_defaults(func=cmd_haplotree_info)
+
+    # Tree overlaps command
+    overlaps_parser = subparsers.add_parser("overlaps", help="Show overlapping profiles between haplogroup trees")
+    overlaps_parser.add_argument("haplogroup1", nargs="?", help="First haplogroup (optional)")
+    overlaps_parser.add_argument("haplogroup2", nargs="?", help="Second haplogroup (optional)")
+    overlaps_parser.add_argument("--export", "-e", help="Export overlaps to CSV file")
+    overlaps_parser.set_defaults(func=cmd_tree_overlaps)
+
+    # Tree members command
+    members_parser = subparsers.add_parser("members", help="List members of a haplogroup tree")
+    members_parser.add_argument("haplogroup", help="Haplogroup to list members for")
+    members_parser.add_argument("--export", "-e", help="Export to CSV file")
+    members_parser.set_defaults(func=cmd_tree_members)
+
+    # Import from Geni project command
+    project_parser = subparsers.add_parser("project", help="Import profiles from a Geni haplogroup project")
+    project_parser.add_argument("project_id", help="Geni project ID (numeric part from URL)")
+    project_parser.add_argument("haplogroup", help="Haplogroup name (e.g., R-FT86690)")
+    project_parser.add_argument("--propagate", "-p", action="store_true", help="Propagate from imported profiles")
+    project_parser.add_argument("--max-propagate", "-m", type=int, default=10, help="Max profiles to propagate from (default: 10)")
+    project_parser.set_defaults(func=cmd_import_project)
 
     # Run interactive command
     run_parser = subparsers.add_parser("run", help="Interactive mode - prompts for profile and haplogroup")

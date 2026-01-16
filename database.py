@@ -141,6 +141,21 @@ class Database:
             )
         """)
 
+        # Tree memberships table - tracks which profiles were visited during each haplogroup tree traversal
+        # This is separate from haplogroup assignments - a profile can be in multiple trees
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tree_memberships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                haplogroup TEXT NOT NULL,
+                generation INTEGER,
+                root_profile_id TEXT,
+                added_at TEXT,
+                FOREIGN KEY (profile_id) REFERENCES profiles(geni_id),
+                UNIQUE(profile_id, haplogroup)
+            )
+        """)
+
         # Create indexes for faster lookups
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_gender ON profiles(gender)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_last_name ON profiles(last_name)")
@@ -149,6 +164,8 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_haplogroups_profile ON haplogroups(profile_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_haplogroups_haplogroup ON haplogroups(haplogroup)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_explored_haplogroup ON explored_profiles(haplogroup)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tree_memberships_profile ON tree_memberships(profile_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tree_memberships_haplogroup ON tree_memberships(haplogroup)")
 
         self.conn.commit()
 
@@ -328,7 +345,7 @@ class Database:
         return [dict(row) for row in cursor.fetchall()]
 
     def get_haplogroup(self, profile_id: str) -> Optional[dict]:
-        """Get haplogroup assignment for a profile."""
+        """Get haplogroup assignment for a profile (returns most relevant one)."""
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT * FROM haplogroups WHERE profile_id = ?
@@ -336,6 +353,15 @@ class Database:
         """, (profile_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+    def get_profile_haplogroups(self, profile_id: str) -> list:
+        """Get ALL haplogroup assignments for a profile."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM haplogroups WHERE profile_id = ?
+            ORDER BY is_tested DESC, created_at DESC
+        """, (profile_id,))
+        return [dict(row) for row in cursor.fetchall()]
 
     def get_profiles_by_haplogroup(self, haplogroup: str) -> list:
         """Get all profiles with a specific haplogroup."""
@@ -455,6 +481,115 @@ class Database:
             cursor.execute("DELETE FROM explored_profiles WHERE haplogroup = ?", (haplogroup,))
         else:
             cursor.execute("DELETE FROM explored_profiles")
+        self.conn.commit()
+
+    def add_tree_membership(self, profile_id: str, haplogroup: str,
+                            generation: int = None, root_profile_id: str = None):
+        """Add a profile to a haplogroup tree (tracks tree membership, not assignment)."""
+        cursor = self.conn.cursor()
+        now = datetime.utcnow().isoformat()
+
+        cursor.execute("""
+            INSERT OR IGNORE INTO tree_memberships
+            (profile_id, haplogroup, generation, root_profile_id, added_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (profile_id, haplogroup, generation, root_profile_id, now))
+
+        self.conn.commit()
+
+    def get_tree_members(self, haplogroup: str) -> list:
+        """Get all profiles that are members of a haplogroup tree."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT tm.*, p.display_name, p.first_name, p.last_name, p.birth_place
+            FROM tree_memberships tm
+            JOIN profiles p ON tm.profile_id = p.geni_id
+            WHERE tm.haplogroup = ?
+            ORDER BY tm.generation
+        """, (haplogroup,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_profile_trees(self, profile_id: str) -> list:
+        """Get all haplogroup trees a profile belongs to."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT haplogroup, generation, root_profile_id, added_at
+            FROM tree_memberships
+            WHERE profile_id = ?
+        """, (profile_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_tree_overlaps(self, haplogroup1: str, haplogroup2: str) -> list:
+        """Find profiles that exist in both haplogroup trees."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT t1.profile_id, p.display_name, p.first_name, p.last_name, p.birth_place,
+                   t1.generation as gen_in_tree1, t2.generation as gen_in_tree2
+            FROM tree_memberships t1
+            JOIN tree_memberships t2 ON t1.profile_id = t2.profile_id
+            JOIN profiles p ON t1.profile_id = p.geni_id
+            WHERE t1.haplogroup = ? AND t2.haplogroup = ?
+            ORDER BY t1.generation
+        """, (haplogroup1, haplogroup2))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_all_tree_overlaps(self) -> dict:
+        """Find all overlapping profiles between all haplogroup trees."""
+        cursor = self.conn.cursor()
+
+        # Get all unique haplogroups
+        cursor.execute("SELECT DISTINCT haplogroup FROM tree_memberships")
+        haplogroups = [row[0] for row in cursor.fetchall()]
+
+        overlaps = {}
+        for i, hg1 in enumerate(haplogroups):
+            for hg2 in haplogroups[i+1:]:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM tree_memberships t1
+                    JOIN tree_memberships t2 ON t1.profile_id = t2.profile_id
+                    WHERE t1.haplogroup = ? AND t2.haplogroup = ?
+                """, (hg1, hg2))
+                count = cursor.fetchone()[0]
+                if count > 0:
+                    overlaps[f"{hg1} vs {hg2}"] = count
+
+        return overlaps
+
+    def get_tree_statistics(self) -> dict:
+        """Get statistics about tree memberships."""
+        cursor = self.conn.cursor()
+
+        stats = {}
+
+        # Count profiles per tree
+        cursor.execute("""
+            SELECT haplogroup, COUNT(*) as count,
+                   MAX(generation) as max_gen,
+                   root_profile_id
+            FROM tree_memberships
+            GROUP BY haplogroup
+            ORDER BY count DESC
+        """)
+        stats["trees"] = [dict(row) for row in cursor.fetchall()]
+
+        # Count profiles in multiple trees
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT profile_id FROM tree_memberships
+                GROUP BY profile_id HAVING COUNT(*) > 1
+            )
+        """)
+        stats["profiles_in_multiple_trees"] = cursor.fetchone()[0]
+
+        return stats
+
+    def clear_tree_memberships(self, haplogroup: str = None):
+        """Clear tree memberships. If haplogroup specified, only clear that tree."""
+        cursor = self.conn.cursor()
+        if haplogroup:
+            cursor.execute("DELETE FROM tree_memberships WHERE haplogroup = ?", (haplogroup,))
+        else:
+            cursor.execute("DELETE FROM tree_memberships")
         self.conn.commit()
 
     def get_statistics(self) -> dict:
